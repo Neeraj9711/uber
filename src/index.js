@@ -91,6 +91,53 @@ function createApp() {
     res.json(result);
   });
 
+  app.post("/auth/driver/signup", (req, res) => {
+    const email = normalizeEmail(req.body.email);
+    const password = String(req.body.password || "");
+    const name = String(req.body.name || "").trim();
+    if (!email) return res.status(400).json({ error: "Enter an email address." });
+    if (password.length < 8) return res.status(400).json({ error: "Use a password of at least 8 characters." });
+    if (!name) return res.status(400).json({ error: "Enter your name." });
+    const result = update((db) => {
+      if (db.drivers.some((item) => item.email && item.email.toLowerCase() === email)) {
+        return { error: "That email is already in use.", status: 409 };
+      }
+      const driver = newDriver(placeholderPhone(db));
+      driver.name = name;
+      driver.firstName = name.split(/\s+/)[0] || name;
+      driver.email = email;
+      driver.passwordHash = bcrypt.hashSync(password, 8);
+      driver.status = "approved";
+      driver.trainingComplete = true;
+      driver.vehicle = "bicycle";
+      driver.deviceId = String(req.body.deviceId || "device");
+      db.drivers.push(driver);
+      audit(db, { actorId: driver.id, action: "driver_email_signup" });
+      return { token: signToken(driverToken(driver)), driver: publicDriver(driver) };
+    });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.status(201).json(result);
+  });
+
+  app.post("/auth/driver/login", (req, res) => {
+    const email = normalizeEmail(req.body.email);
+    const password = String(req.body.password || "");
+    const deviceId = String(req.body.deviceId || "device");
+    if (!email || !password) return res.status(400).json({ error: "Enter your email and password." });
+    const result = update((db) => {
+      const driver = db.drivers.find((item) => item.email && item.email.toLowerCase() === email);
+      if (!driver || !driver.passwordHash || !bcrypt.compareSync(password, driver.passwordHash)) {
+        return { error: "Could not sign in.", status: 401 };
+      }
+      driver.deviceId = deviceId;
+      driver.sessionVersion += 1;
+      audit(db, { actorId: driver.id, action: "driver_email_sign_in" });
+      return { token: signToken(driverToken(driver)), driver: publicDriver(driver) };
+    });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.json(result);
+  });
+
   app.post("/auth/restaurant/login", (req, res) => {
     const email = String(req.body.email || "").toLowerCase().trim();
     const password = String(req.body.password || "");
@@ -932,6 +979,20 @@ function normalizePhone(value) {
   return digits.startsWith("+") ? digits : `+${digits}`;
 }
 
+function normalizeEmail(value) {
+  const email = String(value || "").toLowerCase().trim();
+  if (!email.includes("@") || email.startsWith("@") || email.endsWith("@")) return "";
+  return email;
+}
+
+function placeholderPhone(db) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const phone = `+1555${crypto.randomInt(1000000, 9999999)}`;
+    if (!db.drivers.some((item) => item.phone === phone)) return phone;
+  }
+  return `+1${Date.now()}`;
+}
+
 function newDriver(phone) {
   return {
     id: crypto.randomUUID(),
@@ -971,7 +1032,8 @@ function publicDriver(driver) {
     name: driver.name,
     firstName: driver.firstName,
     phone: driver.phone,
-    phoneLast4: driver.phone.slice(-4),
+    phoneLast4: String(driver.phone || "").slice(-4),
+    email: driver.email || "",
     status: driver.status,
     level: driver.level,
     lifetimeCompleted: driver.lifetimeCompleted,

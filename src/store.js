@@ -93,6 +93,7 @@ function seed() {
         firstName: "Raj",
         phone: "+15551230001",
         email: "raj@example.com",
+        passwordHash: password,
         status: "approved",
         sessionVersion: 1,
         deviceId: null,
@@ -293,8 +294,17 @@ function staff(id, restaurantId, name, email, role, pin, passwordHash) {
 }
 
 function ensure() {
-  if (!fs.existsSync(dataPath())) seed();
-  return load();
+  if (!fs.existsSync(dataPath())) return seed();
+  const db = load();
+  let changed = false;
+  for (const driver of db.drivers || []) {
+    if (String(driver.email || "").toLowerCase() === "raj@example.com" && !driver.passwordHash) {
+      driver.passwordHash = hash("PopDrivers123!");
+      changed = true;
+    }
+  }
+  if (changed) save(db);
+  return db;
 }
 
 module.exports = { load, save, update, ensure, seed, dataPath };

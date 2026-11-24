@@ -191,6 +191,40 @@ async function main() {
   });
   assert.strictEqual(track.status, 404);
 
+  const badPassword = await call("/auth/driver/login", {
+    method: "POST",
+    body: { email: "raj@example.com", password: "wrong-password" },
+  });
+  assert.strictEqual(badPassword.status, 401);
+
+  const emailLogin = await call("/auth/driver/login", {
+    method: "POST",
+    body: { email: "raj@example.com", password: "PopDrivers123!", deviceId: "phone-email" },
+  });
+  assert.strictEqual(emailLogin.status, 200);
+  assert.strictEqual(emailLogin.data.driver.email, "raj@example.com");
+  assert.strictEqual(emailLogin.data.driver.level, "silver");
+
+  const shortPassword = await call("/auth/driver/signup", {
+    method: "POST",
+    body: { name: "Ada", email: "ada@example.com", password: "short" },
+  });
+  assert.strictEqual(shortPassword.status, 400);
+
+  const signedUp = await call("/auth/driver/signup", {
+    method: "POST",
+    body: { name: "Ada Lovelace", email: "ada@example.com", password: "PopDrivers123!", deviceId: "phone-ada" },
+  });
+  assert.strictEqual(signedUp.status, 201);
+  assert.strictEqual(signedUp.data.driver.status, "approved");
+  assert.strictEqual(signedUp.data.driver.name, "Ada Lovelace");
+
+  const duplicate = await call("/auth/driver/signup", {
+    method: "POST",
+    body: { name: "Ada", email: "ada@example.com", password: "PopDrivers123!" },
+  });
+  assert.strictEqual(duplicate.status, 409);
+
   server.close();
   console.log("api ok");
 }
