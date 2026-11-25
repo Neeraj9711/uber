@@ -74,6 +74,9 @@ async function main() {
   assert.strictEqual(created.data.order.pay.restaurantFee, 7.25);
   assert.strictEqual(created.data.order.pay.driverTotal, 9.26);
   assert.strictEqual(created.data.order.status, "created");
+  const kitchen = await call(`/restaurant/orders/${created.data.order.id}/ready`, { method: "POST", token: owner });
+  assert.strictEqual(kitchen.status, 200);
+  assert.strictEqual(kitchen.data.order.kitchenReady, true);
 
   const cancel = await call(`/restaurant/orders/${created.data.order.id}/cancel`, {
     method: "POST",

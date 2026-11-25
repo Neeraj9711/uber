@@ -1007,6 +1007,22 @@ function createApp() {
     res.json(result);
   });
 
+  app.post("/restaurant/orders/:id/ready", auth("owner", "manager", "counter"), (req, res) => {
+    const result = update((db) => {
+      const order = ownedOrder(db, req);
+      if (!order) return { error: "Order not found.", status: 404 };
+      if (["delivered", "returned", "cancelled"].includes(order.status)) {
+        return { error: "This order can no longer be marked ready.", status: 409 };
+      }
+      order.kitchenReady = true;
+      if (new Date(order.readyAt).getTime() > Date.now()) order.readyAt = new Date().toISOString();
+      audit(db, { actorId: req.staff.id, action: "kitchen_ready", orderId: order.id });
+      return { order: restaurantOrder(db, order) };
+    });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.json(result);
+  });
+
   app.post("/restaurant/orders/:id/cancel", auth("owner", "manager"), (req, res) => {
     const result = update((db) => {
       const order = ownedOrder(db, req);
@@ -1689,6 +1705,15 @@ function mustActive(db, driverId) {
   return activeOrder(db, driverId) || { error: "No active delivery.", status: 404 };
 }
 
+function cleanItems(items) {
+  if (!Array.isArray(items)) return [];
+  return items.slice(0, 20).map((item) => ({
+    name: String(item.name || "").trim().slice(0, 80),
+    qty: Math.min(20, Math.max(1, Number(item.qty) || 1)),
+    note: String(item.note || "").trim().slice(0, 120),
+  })).filter((item) => item.name);
+}
+
 function createOrder(db, actor, body) {
   const address = String(body.address || "").trim();
   const customerName = String(body.customerName || "").trim();
@@ -1721,6 +1746,9 @@ function createOrder(db, actor, body) {
     alcohol,
     large,
     tip,
+    utensils: Boolean(body.utensils),
+    items: cleanItems(body.items),
+    kitchenReady: false,
     readyAt: body.readyAt || new Date(Date.now() + readyMinutes * 60 * 1000).toISOString(),
     distanceMiles,
     zone: restaurant.zone,
@@ -1760,6 +1788,9 @@ function restaurantOrder(db, order) {
     area: order.area,
     notes: order.notes,
     bags: order.bags,
+    items: order.items || [],
+    utensils: Boolean(order.utensils),
+    kitchenReady: Boolean(order.kitchenReady),
     alcohol: order.alcohol,
     large: order.large,
     tip: order.tip,

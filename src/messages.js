@@ -52,6 +52,7 @@ const EXACT = {
   "This account was deleted.": ["Esta cuenta fue eliminada.", "此账号已删除。"],
   "Order not found.": ["No se encontró el pedido.", "找不到该订单。"],
   "A driver has already been requested.": ["Ya se pidió un conductor.", "已经请求过司机。"],
+  "This order can no longer be marked ready.": ["Este pedido ya no se puede marcar como listo.", "该订单不能再标记为已出餐。"],
   "This order can no longer be cancelled.": ["Este pedido ya no se puede cancelar.", "此订单已不能取消。"],
   "Choose a rating from 1 to 5.": ["Elige una calificación del 1 al 5.", "请选择 1 到 5 的评分。"],
   "Rate the driver after delivery.": ["Califica al conductor después de la entrega.", "请在送达后为司机评分。"],
