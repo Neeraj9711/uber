@@ -74,6 +74,13 @@ async function main() {
   assert.strictEqual(created.data.order.pay.restaurantFee, 7.25);
   assert.strictEqual(created.data.order.pay.driverTotal, 9.26);
   assert.strictEqual(created.data.order.status, "created");
+  assert.strictEqual(created.data.order.payType, "online");
+  const invoice = await call("/restaurant/billing", { token: owner });
+  assert.strictEqual(invoice.status, 200);
+  assert.ok(invoice.data.invoice.number);
+  assert.ok(Array.isArray(invoice.data.invoice.lines));
+  assert.strictEqual(typeof invoice.data.invoice.totalOwed, "number");
+  assert.ok(invoice.data.invoice.csv.startsWith("type,restaurant,order_number"));
   const kitchen = await call(`/restaurant/orders/${created.data.order.id}/ready`, { method: "POST", token: owner });
   assert.strictEqual(kitchen.status, 200);
   assert.strictEqual(kitchen.data.order.kitchenReady, true);

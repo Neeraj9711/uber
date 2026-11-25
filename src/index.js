@@ -1058,19 +1058,52 @@ function createApp() {
 
   app.get("/restaurant/billing", auth("owner", "manager"), (req, res) => {
     const db = ensure();
-    const rows = db.orders
-      .filter((item) => item.restaurantId === req.staff.restaurantId && item.pay)
-      .map((item) => ({
-        id: item.id,
-        at: item.createdAt,
-        status: item.status,
-        deliveryFee: item.pay.restaurantFee,
-        last4: null,
-      }));
+    const restaurant = restaurantById(db, req.staff.restaurantId);
+    const owner = db.staff.find((item) => item.restaurantId === restaurant.id && item.role === "owner" && item.active);
+    const week = invoiceWeek(new Date());
+    const lines = db.orders
+      .filter((item) => item.restaurantId === restaurant.id && item.status === "delivered" && item.pay)
+      .filter((item) => {
+        const day = laDayKey(new Date(item.deliveredAt || item.createdAt));
+        return day >= week.start && day <= week.end;
+      })
+      .sort((a, b) => new Date(a.deliveredAt || a.createdAt) - new Date(b.deliveredAt || b.createdAt))
+      .map((item) => {
+        const deliveryFee = item.pay.restaurantFee;
+        const tip = item.tip || 0;
+        return {
+          id: item.id,
+          orderNumber: orderCode(item.id),
+          at: item.deliveredAt || item.createdAt,
+          requestedLabel: invoiceStamp(item.deliveredAt || item.createdAt),
+          type: item.payType || "online",
+          address: item.address,
+          deliveryFee,
+          tip,
+          total: rules.round(deliveryFee + tip),
+        };
+      });
+    const deliveryFees = rules.round(lines.reduce((sum, line) => sum + line.deliveryFee, 0));
+    const tips = rules.round(lines.reduce((sum, line) => sum + line.tip, 0));
+    const totalOwed = rules.round(deliveryFees + tips);
+    const csv = invoiceCsv(restaurant.name, lines);
     res.json({
-      rows,
-      total: rules.round(rows.reduce((sum, row) => sum + row.deliveryFee, 0)),
-      note: "Card numbers are not stored. These are delivery fees only.",
+      invoice: {
+        number: invoiceCode(restaurant.id, week.start),
+        restaurantName: restaurant.name,
+        restaurantAddress: restaurant.address,
+        restaurantEmail: owner ? owner.email : req.staff.email,
+        periodLabel: `${longDay(week.start)} to ${longDay(week.end)}`,
+        dueLabel: longDay(week.due),
+        createdLabel: invoiceStamp(new Date().toISOString()),
+        deliveries: lines.length,
+        deliveryFees,
+        tips,
+        totalOwed,
+        lines,
+        csv,
+      },
+      note: "Tips are paid in full to the driver. Card numbers are not stored.",
     });
   });
 
@@ -1706,6 +1739,75 @@ function mustActive(db, driverId) {
   return activeOrder(db, driverId) || { error: "No active delivery.", status: 404 };
 }
 
+function laDayKey(date) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
+}
+
+function addDays(key, days) {
+  const [year, month, day] = key.split("-").map(Number);
+  const utc = new Date(Date.UTC(year, month - 1, day));
+  utc.setUTCDate(utc.getUTCDate() + days);
+  return utc.toISOString().slice(0, 10);
+}
+
+function invoiceWeek(now) {
+  const weekday = new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", weekday: "short" }).format(now);
+  const back = { Thu: 0, Fri: 1, Sat: 2, Sun: 3, Mon: 4, Tue: 5, Wed: 6 }[weekday] || 0;
+  const start = addDays(laDayKey(now), -back);
+  const end = addDays(start, 6);
+  return { start, end, due: addDays(end, 1) };
+}
+
+function longDay(key) {
+  const [year, month, day] = key.split("-").map(Number);
+  return new Intl.DateTimeFormat("en-US", {
+    weekday: "short",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(new Date(Date.UTC(year, month - 1, day, 12)));
+}
+
+function invoiceStamp(iso) {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(iso));
+}
+
+function invoiceCode(restaurantId, start) {
+  let hash = 0;
+  const raw = `${restaurantId}:${start}`;
+  for (let index = 0; index < raw.length; index += 1) hash = (hash * 33 + raw.charCodeAt(index)) >>> 0;
+  return hash.toString(36).toUpperCase().padStart(5, "0").slice(-5);
+}
+
+function orderCode(id) {
+  return String(id || "").replace(/-/g, "").slice(-5).toUpperCase();
+}
+
+function csvCell(value) {
+  const text = String(value ?? "");
+  if (/[",\n]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
+  return text;
+}
+
+function invoiceCsv(restaurantName, lines) {
+  const header = "type,restaurant,order_number,requested,delivery_fee,tip,total,address";
+  const rows = lines.map((line) => [line.type, restaurantName, line.orderNumber, line.requestedLabel, line.deliveryFee, line.tip, line.total, line.address].map(csvCell).join(","));
+  return [header, ...rows].join("\n");
+}
+
 function cleanItems(items) {
   if (!Array.isArray(items)) return [];
   return items.slice(0, 20).map((item) => ({
@@ -1747,6 +1849,7 @@ function createOrder(db, actor, body) {
     alcohol,
     large,
     tip,
+    payType: ["cash", "card", "online"].includes(body.payType) ? body.payType : "online",
     utensils: Boolean(body.utensils),
     items: cleanItems(body.items),
     kitchenReady: false,
@@ -1795,6 +1898,7 @@ function restaurantOrder(db, order) {
     alcohol: order.alcohol,
     large: order.large,
     tip: order.tip,
+    payType: order.payType || "online",
     readyAt: order.readyAt,
     distanceMiles: order.distanceMiles,
     pay: order.pay,
