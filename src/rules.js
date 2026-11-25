@@ -169,6 +169,10 @@ function reviewQuality(driver, orders, now = Date.now()) {
   };
 }
 
+function isMonthlyReviewDay(now = new Date()) {
+  return now.getDate() === 1;
+}
+
 function standing(driver, orders, now = Date.now()) {
   const quality = reviewQuality(driver, orders, now);
   let level = driver.level;
@@ -262,6 +266,7 @@ module.exports = {
   mentorBonus,
   deviceProblem,
   reviewQuality,
+  isMonthlyReviewDay,
   standing,
   earningsSplit,
   versionBelow,

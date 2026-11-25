@@ -639,39 +639,15 @@ function createApp() {
   });
 
   app.get("/driver/level", auth("driver"), (req, res) => {
-    const result = update((db) => {
-      const driver = fresh(db, req);
-      const next = rules.standing(driver, db.orders);
-      driver.level = next.level;
-      driver.atRiskSince = next.atRiskSince;
-      driver.paused = next.paused;
-      driver.pausedAt = next.pausedAt;
-      driver.qualityStatus = next.quality.status;
-      if (next.event) {
-        db.levelEvents.push({
-          id: crypto.randomUUID(),
-          driverId: driver.id,
-          from: next.event.from,
-          to: next.event.to,
-          reason: next.event.reason,
-          actorId: "server",
-          note: next.event.note,
-          at: new Date().toISOString(),
-        });
-        db.inbox.push({
-          id: crypto.randomUUID(),
-          driverId: driver.id,
-          title: next.event.reason === "quality" ? "Level review" : "Level update",
-          body: next.event.note,
-          at: new Date().toISOString(),
-        });
-      }
-      const month = new Date().toISOString().slice(0, 7);
-      if (!db.qualitySnapshots.some((item) => item.driverId === driver.id && item.period === month)) {
-        db.qualitySnapshots.push({ driverId: driver.id, period: month, ...next.quality, at: new Date().toISOString() });
-      }
-      return publicLevel(driver, db, next.quality);
-    });
+    const db = ensure();
+    const quality = rules.reviewQuality(req.driver, db.orders);
+    const lines = qualityLines(db, req.driver);
+    res.json({ ...publicLevel(req.driver, db, quality), ratings: lines.ratings, latePickups: lines.latePickups });
+  });
+
+  app.post("/jobs/monthly-review", (req, res) => {
+    const now = DEMO && req.body && req.body.now ? new Date(req.body.now) : new Date();
+    const result = update((db) => applyMonthlyReview(db, now));
     res.json(result);
   });
 
@@ -726,13 +702,16 @@ function createApp() {
     });
   });
 
-  app.get("/driver/preferences", auth("driver"), (req, res) => res.json(req.driver.preferences));
+  app.get("/driver/preferences", auth("driver"), (req, res) => {
+    res.json(preferenceView(ensure(), req.driver));
+  });
 
   app.put("/driver/preferences", auth("driver"), (req, res) => {
     const result = update((db) => {
       const driver = fresh(db, req);
       const body = req.body || {};
       const favorites = Array.isArray(body.favorites) ? body.favorites.map(String).slice(0, 3) : driver.preferences.favorites || [];
+      if (["car", "motorcycle", "bicycle"].includes(body.vehicle)) driver.vehicle = body.vehicle;
       driver.preferences = {
         maxDistance: Math.min(30, Math.max(1, Number(body.maxDistance) || driver.preferences.maxDistance)),
         alcoholOk: Boolean(body.alcoholOk),
@@ -741,7 +720,7 @@ function createApp() {
         favorites: rules.LEVEL_RANK[driver.level] >= rules.LEVEL_RANK.platinum ? favorites : [],
       };
       audit(db, { actorId: driver.id, action: "preferences_saved" });
-      return driver.preferences;
+      return preferenceView(db, driver);
     });
     res.json(result);
   });
@@ -1647,9 +1626,94 @@ function trackPage(message, token) {
   return `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Pop-Drivers tracking</title></head><body style="font-family:Georgia,serif;background:#f3f0e8;color:#1c2b24;padding:32px"><h1>Pop-Drivers</h1><p>${safe}</p>${buttons}</body></html>`;
 }
 
+function preferenceView(db, driver) {
+  const zoneChoices = [...new Set((db.restaurants || []).map((item) => item.zone).filter(Boolean))];
+  return {
+    ...driver.preferences,
+    favorites: driver.preferences.favorites || [],
+    zones: driver.preferences.zones || [],
+    vehicle: driver.vehicle,
+    zoneChoices,
+  };
+}
+
+function qualityLines(db, driver, now = Date.now()) {
+  const start = now - 90 * 24 * 60 * 60 * 1000;
+  const recent = db.orders.filter((order) => order.driverId === driver.id && new Date(order.deliveredAt || order.createdAt).getTime() >= start);
+  const name = (order) => restaurantById(db, order.restaurantId).name;
+  const ratings = recent
+    .filter((order) => Number(order.rating) >= 1)
+    .map((order) => ({ id: order.id, restaurantName: name(order), rating: order.rating, at: order.deliveredAt || order.createdAt }));
+  const latePickups = recent
+    .filter((order) => order.status === "delivered" && !order.kitchenLate && order.arrivedAt && order.readyAt)
+    .filter((order) => new Date(order.arrivedAt).getTime() - new Date(order.readyAt).getTime() > 5 * 60 * 1000)
+    .map((order) => ({
+      id: order.id,
+      restaurantName: name(order),
+      minutesLate: Math.round((new Date(order.arrivedAt).getTime() - new Date(order.readyAt).getTime()) / 60000),
+      at: order.deliveredAt || order.arrivedAt,
+    }));
+  return { ratings, latePickups };
+}
+
+function applyMonthlyReview(db, now = new Date()) {
+  if (!rules.isMonthlyReviewDay(now)) return { ran: false, reason: "Quality is reviewed on the 1st of each month." };
+  const period = now.toISOString().slice(0, 7);
+  if (db.lastQualityReview === period) return { ran: false, reason: "This month was already reviewed.", period };
+  let changes = 0;
+  for (const driver of db.drivers) {
+    const next = rules.standing(driver, db.orders, now.getTime());
+    driver.level = next.level;
+    driver.atRiskSince = next.atRiskSince;
+    driver.paused = next.paused;
+    driver.pausedAt = next.pausedAt;
+    driver.qualityStatus = next.quality.status;
+    driver.ratingAvg = next.quality.ratingCount ? next.quality.ratingAvg : driver.ratingAvg;
+    driver.ratingCount = next.quality.ratingCount || driver.ratingCount;
+    driver.onTimePct = next.quality.onTimePct;
+    driver.cancelPct = next.quality.cancelPct;
+    if (!db.qualitySnapshots.some((item) => item.driverId === driver.id && item.period === period)) {
+      db.qualitySnapshots.push({ driverId: driver.id, period, ...next.quality, at: now.toISOString() });
+    }
+    if (next.event) {
+      changes += 1;
+      db.levelEvents.push({
+        id: crypto.randomUUID(),
+        driverId: driver.id,
+        from: next.event.from,
+        to: next.event.to,
+        reason: next.event.reason,
+        actorId: "server",
+        note: next.event.note,
+        at: now.toISOString(),
+      });
+      db.inbox.push({
+        id: crypto.randomUUID(),
+        driverId: driver.id,
+        title: "Level review",
+        body: next.event.note,
+        at: now.toISOString(),
+      });
+    }
+  }
+  db.lastQualityReview = period;
+  return { ran: true, period, changes };
+}
+
 if (require.main === module) {
   const port = Number(process.env.PORT || 4000);
-  createApp().listen(port, () => {
+  const app = createApp();
+  const review = () => {
+    try {
+      update((db) => applyMonthlyReview(db, new Date()));
+    } catch (error) {
+      console.error(error);
+    }
+  };
+  review();
+  const timer = setInterval(review, 60 * 60 * 1000);
+  if (timer.unref) timer.unref();
+  app.listen(port, () => {
     console.log(`Pop-Drivers API listening on http://localhost:${port}`);
   });
 }

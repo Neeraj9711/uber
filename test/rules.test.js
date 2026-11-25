@@ -78,5 +78,7 @@ assert.strictEqual(split.miles, 2.2);
 assert.strictEqual(rules.versionBelow("0.9.0", "1.0.0"), true);
 assert.strictEqual(rules.versionBelow("1.0.0", "1.0.0"), false);
 assert.strictEqual(rules.inRollout("phone", 100), true);
+assert.strictEqual(rules.isMonthlyReviewDay(new Date("2026-12-01T12:00:00")), true);
+assert.strictEqual(rules.isMonthlyReviewDay(new Date("2026-11-25T12:00:00")), false);
 
 console.log("rules ok");

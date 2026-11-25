@@ -311,6 +311,16 @@ async function main() {
   const thumb = await call(`${share.data.sharePath}/thumb?vote=up`);
   assert.strictEqual(thumb.status, 200);
 
+  const skippedReview = await call("/jobs/monthly-review", { method: "POST", body: { now: "2026-11-25T12:00:00" } });
+  assert.strictEqual(skippedReview.status, 200);
+  assert.strictEqual(skippedReview.data.ran, false);
+  const monthReview = await call("/jobs/monthly-review", { method: "POST", body: { now: "2026-12-01T12:00:00" } });
+  assert.strictEqual(monthReview.status, 200);
+  assert.strictEqual(monthReview.data.ran, true);
+  const levelView = await call("/driver/level", { token });
+  assert.ok(Array.isArray(levelView.data.ratings));
+  assert.ok(Array.isArray(levelView.data.latePickups));
+
   server.close();
   console.log("api ok");
 }
