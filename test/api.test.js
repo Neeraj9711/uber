@@ -259,6 +259,58 @@ async function main() {
   assert.strictEqual(cafeLogin.data.staff.restaurantName, "Papa's Pizza");
   assert.strictEqual(cafeLogin.data.staff.role, "owner");
 
+  const forced = await call("/app/release?version=0.9.0&deviceId=phone");
+  assert.strictEqual(forced.status, 200);
+  assert.strictEqual(forced.data.updateRequired, true);
+  const currentRelease = await call("/app/release?version=1.0.0&deviceId=phone");
+  assert.strictEqual(currentRelease.data.updateRequired, false);
+
+  const token = emailLogin.data.token;
+  const mocked = await call("/driver/online", {
+    method: "POST",
+    token,
+    body: { online: true, mocked: true, location: { lat: 37.7749, lng: -122.4194 } },
+  });
+  assert.strictEqual(mocked.status, 403);
+
+  const earnings = await call("/driver/earnings", { token });
+  assert.strictEqual(earnings.status, 200);
+  assert.strictEqual(typeof earnings.data.today, "number");
+  assert.ok(Array.isArray(earnings.data.pastWeeks));
+  assert.strictEqual(typeof earnings.data.miles, "number");
+
+  const level = await call("/driver/level", { token });
+  assert.strictEqual(level.status, 200);
+  assert.ok(Array.isArray(level.data.history));
+  assert.ok(level.data.rolling);
+
+  const thumbOrder = await call("/restaurant/orders", {
+    method: "POST",
+    token: cafeLogin.data.token,
+    body: { customerName: "Thumb", phone: "4155550100", address: "18 Oak Street, San Francisco", bags: 1, tip: 0 },
+  });
+  assert.strictEqual(thumbOrder.status, 201);
+  const requested = await call(`/restaurant/orders/${thumbOrder.data.order.id}/request-driver`, {
+    method: "POST",
+    token: cafeLogin.data.token,
+  });
+  assert.strictEqual(requested.status, 200);
+  await new Promise((resolve) => setTimeout(resolve, 11000));
+  const onlineAgain = await call("/driver/online", {
+    method: "POST",
+    token,
+    body: { online: true, location: { lat: 37.7749, lng: -122.4194 } },
+  });
+  assert.strictEqual(onlineAgain.status, 200);
+  assert.ok(onlineAgain.data.offer);
+  const taken = await call(`/driver/offers/${onlineAgain.data.offer.offerId}/accept`, { method: "POST", token });
+  assert.strictEqual(taken.status, 200);
+  const share = await call("/driver/safety/report", { method: "POST", token, body: { type: "share", note: "" } });
+  assert.strictEqual(share.status, 200);
+  assert.ok(share.data.sharePath);
+  const thumb = await call(`${share.data.sharePath}/thumb?vote=up`);
+  assert.strictEqual(thumb.status, 200);
+
   server.close();
   console.log("api ok");
 }

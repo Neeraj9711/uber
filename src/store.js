@@ -118,6 +118,7 @@ function seed() {
           alcoholOk: true,
           largeOk: true,
           zones: [],
+          favorites: [],
         },
         documents: [
           { type: "license", expiresAt: daysFromNow(40), status: "valid" },
@@ -302,6 +303,15 @@ function ensure() {
       driver.passwordHash = hash("PopDrivers123!");
       changed = true;
     }
+    driver.preferences = driver.preferences || {};
+    if (!Array.isArray(driver.preferences.favorites)) {
+      driver.preferences.favorites = [];
+      changed = true;
+    }
+  }
+  if (!Array.isArray(db.qualitySnapshots)) {
+    db.qualitySnapshots = [];
+    changed = true;
   }
   if (changed) save(db);
   return db;

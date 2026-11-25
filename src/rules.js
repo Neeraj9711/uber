@@ -117,6 +117,134 @@ function cashOutFee(level, freeUsed) {
   return 1.5;
 }
 
+function levelBonus(level) {
+  if (level === "diamond") return 0.5;
+  if (level === "platinum") return 0.25;
+  return 0;
+}
+
+function mentorBonus(level) {
+  return level === "diamond" ? 2 : 0;
+}
+
+function deviceProblem(body) {
+  const source = body || {};
+  const location = source.location || {};
+  if (source.mocked || location.mocked) return "A mock location can't be used.";
+  if (source.rooted || location.rooted) return "A rooted phone can't go online.";
+  if (source.jailbroken || location.jailbroken) return "A jailbroken phone can't go online.";
+  return "";
+}
+
+const DAY = 24 * 60 * 60 * 1000;
+const LEVEL_ORDER = ["starter", "bronze", "silver", "gold", "platinum", "diamond"];
+
+function previousLevel(level) {
+  const index = LEVEL_ORDER.indexOf(level);
+  if (index <= 0) return "starter";
+  return LEVEL_ORDER[index - 1];
+}
+
+function reviewQuality(driver, orders, now = Date.now()) {
+  const start = now - 90 * DAY;
+  const recent = (orders || []).filter((order) => order.driverId === driver.id && new Date(order.deliveredAt || order.createdAt).getTime() >= start);
+  const rated = recent.filter((order) => Number(order.rating) >= 1);
+  const ratingCount = rated.length;
+  const ratingAvg = ratingCount ? round(rated.reduce((sum, order) => sum + Number(order.rating), 0) / ratingCount) : 0;
+  const timed = recent.filter((order) => order.status === "delivered" && !order.kitchenLate && order.arrivedAt && order.readyAt);
+  const onTime = timed.filter((order) => new Date(order.arrivedAt).getTime() - new Date(order.readyAt).getTime() <= 5 * 60 * 1000);
+  const onTimePct = timed.length ? Math.round((100 * onTime.length) / timed.length) : 100;
+  const finished = recent.filter((order) => ["delivered", "cancelled", "returned"].includes(order.status));
+  const driverCancels = finished.filter((order) => order.status === "cancelled" && order.cancelledBy === "driver");
+  const cancelPct = finished.length ? Math.round((100 * driverCancels.length) / finished.length) : 0;
+  const ratingFails = ratingCount >= 20 && ratingAvg < 4.8;
+  const onTimeFails = timed.length >= 5 && onTimePct < 90;
+  const cancelFails = finished.length >= 5 && cancelPct > 5;
+  return {
+    ratingAvg,
+    ratingCount,
+    onTimePct,
+    cancelPct,
+    status: ratingFails || onTimeFails || cancelFails ? "at_risk" : "ok",
+  };
+}
+
+function standing(driver, orders, now = Date.now()) {
+  const quality = reviewQuality(driver, orders, now);
+  let level = driver.level;
+  let atRiskSince = driver.atRiskSince || null;
+  let paused = Boolean(driver.paused);
+  let pausedAt = driver.pausedAt || null;
+  let event = null;
+  const delivered = (orders || []).filter((order) => order.driverId === driver.id && order.status === "delivered" && order.deliveredAt);
+  const last = delivered.reduce((max, order) => Math.max(max, new Date(order.deliveredAt).getTime()), 0);
+  if (last && now - last >= 90 * DAY && !paused) {
+    paused = true;
+    pausedAt = new Date(now).toISOString();
+    event = { from: level, to: level, reason: "inactivity", note: "No deliveries for 90 days" };
+  }
+  const sincePause = pausedAt ? delivered.filter((order) => new Date(order.deliveredAt).getTime() >= new Date(pausedAt).getTime()).length : 0;
+  if (paused && sincePause >= 10 && quality.status === "ok") {
+    paused = false;
+    pausedAt = null;
+    event = { from: level, to: level, reason: "returned", note: "10 deliveries after a pause" };
+  }
+  if (quality.status === "at_risk") {
+    if (!atRiskSince) atRiskSince = new Date(now).toISOString();
+    else if (now - new Date(atRiskSince).getTime() >= 30 * DAY && level !== "starter") {
+      const from = level;
+      level = previousLevel(level);
+      atRiskSince = null;
+      event = { from, to: level, reason: "quality", note: "Below the 90-day standard after 30 days at risk" };
+    }
+  } else if (!paused) {
+    atRiskSince = null;
+  }
+  return { level, quality, atRiskSince, paused, pausedAt, event };
+}
+
+function earningsSplit(rows, now = new Date()) {
+  const day = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const weekStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay()).getTime();
+  let today = 0;
+  let week = 0;
+  let miles = 0;
+  const older = new Map();
+  for (const row of rows) {
+    const at = new Date(row.at).getTime();
+    const amount = round((row.pay?.driverTotal || 0) + (row.returnPay || 0));
+    miles = round(miles + Number(row.distanceMiles || 0));
+    if (at >= day) today = round(today + amount);
+    if (at >= weekStart) week = round(week + amount);
+    else {
+      const date = new Date(at);
+      const label = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+      older.set(label, round((older.get(label) || 0) + amount));
+    }
+  }
+  return { today, week, miles, pastWeeks: [...older.entries()].map(([label, total]) => ({ label, total })) };
+}
+
+function versionBelow(client, minimum) {
+  const parse = (value) => String(value || "0").split(".").map((part) => parseInt(part, 10) || 0);
+  const left = parse(client);
+  const right = parse(minimum);
+  for (let index = 0; index < 3; index += 1) {
+    if ((left[index] || 0) < (right[index] || 0)) return true;
+    if ((left[index] || 0) > (right[index] || 0)) return false;
+  }
+  return false;
+}
+
+function inRollout(deviceId, percent) {
+  const share = Number(percent);
+  if (share >= 100) return true;
+  if (share <= 0) return false;
+  let hash = 0;
+  for (const char of String(deviceId || "device")) hash = (hash + char.charCodeAt(0) * 17) % 100;
+  return hash < share;
+}
+
 module.exports = {
   round,
   levelFor,
@@ -130,4 +258,13 @@ module.exports = {
   canSeeOpenRequest,
   shiftLeadHours,
   cashOutFee,
+  levelBonus,
+  mentorBonus,
+  deviceProblem,
+  reviewQuality,
+  standing,
+  earningsSplit,
+  versionBelow,
+  inRollout,
+  previousLevel,
 };

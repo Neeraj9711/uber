@@ -38,6 +38,22 @@ function createApp() {
 
   app.get("/health", (_req, res) => res.json({ ok: true }));
 
+  app.get("/app/release", (req, res) => {
+    const client = String(req.query.version || "0.0.0");
+    const deviceId = String(req.query.deviceId || "device");
+    const release = {
+      version: process.env.APP_VERSION || "1.0.0",
+      minVersion: process.env.APP_MIN_VERSION || "1.0.0",
+      rolloutPercent: Number(process.env.APP_ROLLOUT_PERCENT || 100),
+    };
+    const inCohort = rules.inRollout(deviceId, release.rolloutPercent);
+    res.json({
+      ...release,
+      inCohort,
+      updateRequired: rules.versionBelow(client, release.minVersion) && inCohort,
+    });
+  });
+
   app.post("/auth/driver/otp/request", (req, res) => {
     const phone = normalizePhone(req.body.phone);
     if (!phone) return res.status(400).json({ error: "Enter a phone number." });
@@ -274,6 +290,8 @@ function createApp() {
       if (online && expiredDoc(driver)) {
         return { error: "A required document has expired. You have been kept offline.", status: 403 };
       }
+      const blocked = online ? rules.deviceProblem(req.body) : "";
+      if (blocked) return { error: blocked, status: 403 };
       driver.online = online;
       if (online && req.body.location) driver.location = point(req.body.location) || driver.location;
       audit(db, { actorId: driver.id, action: online ? "driver_online" : "driver_offline" });
@@ -356,6 +374,8 @@ function createApp() {
     const result = update((db) => {
       const order = mustActive(db, fresh(db, req).id);
       if (order.error) return order;
+      const blocked = rules.deviceProblem(req.body);
+      if (blocked) return { error: blocked, status: 403 };
       const here = point(req.body);
       const target = order.status === "picked_up" ? order.dropoff : order.restaurantLocation;
       const which = order.status === "picked_up" ? "dropoff" : "pickup";
@@ -420,6 +440,38 @@ function createApp() {
     res.json({ display: "(415) 555-0136", dial: `tel:${MASKED_DIAL}` });
   });
 
+  app.post("/driver/delivery/text", auth("driver"), (req, res) => {
+    const message = String(req.body.message || "").trim();
+    if (message.length < 1) return res.status(400).json({ error: "Write a message first." });
+    const result = update((db) => {
+      const order = mustActive(db, fresh(db, req).id);
+      if (order.error) return order;
+      order.texts = order.texts || [];
+      order.texts.push({ at: new Date().toISOString(), body: message.slice(0, 240) });
+      audit(db, { actorId: order.driverId, action: "masked_text", orderId: order.id });
+      return { display: "(415) 555-0136", sent: true };
+    });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.json(result);
+  });
+
+  app.post("/driver/delivery/mentor", auth("driver"), (req, res) => {
+    const result = update((db) => {
+      const driver = fresh(db, req);
+      const bonus = rules.mentorBonus(driver.level);
+      if (!bonus) return { error: "Mentoring pay is for Diamond drivers.", status: 403 };
+      const order = mustActive(db, driver.id);
+      if (order.error) return order;
+      if (order.pay.mentorBonus) return { delivery: driverView(db, order, true, driver), note: "Mentoring pay is already on this order." };
+      order.pay.mentorBonus = bonus;
+      order.pay.driverTotal = rules.round(order.pay.driverTotal + bonus);
+      audit(db, { actorId: driver.id, action: "mentor_bonus", orderId: order.id });
+      return { delivery: driverView(db, order, true, driver), note: "Mentoring pay was added." };
+    });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.json(result);
+  });
+
   app.post("/driver/delivery/proof", auth("driver"), (req, res) => {
     const result = update((db) => {
       const driver = fresh(db, req);
@@ -434,8 +486,17 @@ function createApp() {
       if (order.alcohol && String(req.body.pin || "") !== order.pin) {
         return { error: "Enter the alcohol PIN from the customer.", status: 400 };
       }
+      const blocked = rules.deviceProblem(req.body);
+      if (blocked) return { error: blocked, status: 403 };
       const type = req.body.type === "handoff" ? "handoff" : "photo";
-      order.proof = { type, metadataStripped: true, storedPrivately: true };
+      const rawPhoto = String(req.body.photoBase64 || "").replace(/^data:image\/\w+;base64,/, "");
+      order.proof = {
+        type,
+        metadataStripped: true,
+        reencoded: true,
+        storedPrivately: true,
+        sha256: rawPhoto ? crypto.createHash("sha256").update(rawPhoto).digest("hex") : null,
+      };
       order.locationChecks.dropoff = true;
       order.status = "delivered";
       order.deliveredAt = new Date().toISOString();
@@ -508,7 +569,7 @@ function createApp() {
 
   app.get("/driver/earnings", auth("driver"), (req, res) => {
     const db = ensure();
-    const rows = db.orders
+    const detailed = db.orders
       .filter((item) => item.driverId === req.driver.id && ["delivered", "returned"].includes(item.status))
       .map((item) => ({
         id: item.id,
@@ -517,16 +578,51 @@ function createApp() {
         at: item.deliveredAt || item.createdAt,
         pay: item.pay,
         returnPay: item.returnPay || 0,
+        distanceMiles: item.distanceMiles || 0,
       }));
-    const total = rules.round(
-      rows.reduce((sum, row) => sum + (row.pay?.driverTotal || 0) + (row.returnPay || 0), 0)
-    );
+    const split = rules.earningsSplit(detailed);
     res.json({
       payday: "Thursday",
-      today: total,
-      week: total,
-      deliveries: rows,
+      today: split.today,
+      week: split.week,
+      miles: split.miles,
+      pastWeeks: split.pastWeeks,
+      deliveries: detailed,
       cashOutFee: rules.cashOutFee(req.driver.level, req.driver.cashoutsThisWeek),
+    });
+  });
+
+  app.get("/driver/earnings/export", auth("driver"), (req, res) => {
+    const db = ensure();
+    const lines = ["date,restaurant,miles,pay,status"];
+    db.orders
+      .filter((item) => item.driverId === req.driver.id && ["delivered", "returned"].includes(item.status))
+      .forEach((item) => {
+        const pay = rules.round((item.pay?.driverTotal || 0) + (item.returnPay || 0));
+        const name = restaurantById(db, item.restaurantId).name.replace(/,/g, " ");
+        lines.push(`${item.deliveredAt || item.createdAt},${name},${item.distanceMiles || 0},${pay},${item.status}`);
+      });
+    res.type("text/csv").send(lines.join("\n"));
+  });
+
+  app.get("/driver/map", auth("driver"), (req, res) => {
+    const db = ensure();
+    const driver = req.driver;
+    const rows = db.orders
+      .filter((item) => item.driverId === driver.id && ["delivered", "returned"].includes(item.status))
+      .map((item) => ({
+        at: item.deliveredAt || item.createdAt,
+        pay: item.pay,
+        returnPay: item.returnPay || 0,
+        distanceMiles: item.distanceMiles || 0,
+      }));
+    const split = rules.earningsSplit(rows);
+    const here = driver.location || { lat: 37.7749, lng: -122.4194 };
+    res.json({
+      earningsToday: split.today,
+      zone: { name: "Your zone", lat: here.lat, lng: here.lng, radiusMiles: 2 },
+      restaurants: db.restaurants.map((item) => ({ name: item.name, lat: item.location.lat, lng: item.location.lng })),
+      rushAreas: [{ name: "Downtown rush", lat: here.lat + 0.01, lng: here.lng + 0.01, radiusMiles: 0.6, boost: 1 }],
     });
   });
 
@@ -543,7 +639,40 @@ function createApp() {
   });
 
   app.get("/driver/level", auth("driver"), (req, res) => {
-    res.json(publicLevel(req.driver));
+    const result = update((db) => {
+      const driver = fresh(db, req);
+      const next = rules.standing(driver, db.orders);
+      driver.level = next.level;
+      driver.atRiskSince = next.atRiskSince;
+      driver.paused = next.paused;
+      driver.pausedAt = next.pausedAt;
+      driver.qualityStatus = next.quality.status;
+      if (next.event) {
+        db.levelEvents.push({
+          id: crypto.randomUUID(),
+          driverId: driver.id,
+          from: next.event.from,
+          to: next.event.to,
+          reason: next.event.reason,
+          actorId: "server",
+          note: next.event.note,
+          at: new Date().toISOString(),
+        });
+        db.inbox.push({
+          id: crypto.randomUUID(),
+          driverId: driver.id,
+          title: next.event.reason === "quality" ? "Level review" : "Level update",
+          body: next.event.note,
+          at: new Date().toISOString(),
+        });
+      }
+      const month = new Date().toISOString().slice(0, 7);
+      if (!db.qualitySnapshots.some((item) => item.driverId === driver.id && item.period === month)) {
+        db.qualitySnapshots.push({ driverId: driver.id, period: month, ...next.quality, at: new Date().toISOString() });
+      }
+      return publicLevel(driver, db, next.quality);
+    });
+    res.json(result);
   });
 
   app.post("/driver/level/dispute", auth("driver"), (req, res) => {
@@ -603,11 +732,13 @@ function createApp() {
     const result = update((db) => {
       const driver = fresh(db, req);
       const body = req.body || {};
+      const favorites = Array.isArray(body.favorites) ? body.favorites.map(String).slice(0, 3) : driver.preferences.favorites || [];
       driver.preferences = {
         maxDistance: Math.min(30, Math.max(1, Number(body.maxDistance) || driver.preferences.maxDistance)),
         alcoholOk: Boolean(body.alcoholOk),
         largeOk: Boolean(body.largeOk),
         zones: Array.isArray(body.zones) ? body.zones.map(String).slice(0, 5) : driver.preferences.zones,
+        favorites: rules.LEVEL_RANK[driver.level] >= rules.LEVEL_RANK.platinum ? favorites : [],
       };
       audit(db, { actorId: driver.id, action: "preferences_saved" });
       return driver.preferences;
@@ -689,11 +820,19 @@ function createApp() {
 
   app.post("/driver/safety/report", auth("driver"), (req, res) => {
     const note = String(req.body.note || "").trim();
-    if (note.length < 3) return res.status(400).json({ error: "Tell dispatch what happened." });
-    update((db) => {
-      audit(db, { actorId: req.driver.id, action: "safety_report", note: note.slice(0, 240) });
+    const kind = ["incident", "unsafe_address", "restaurant", "share"].includes(req.body.type) ? req.body.type : "incident";
+    if (kind !== "share" && note.length < 3) return res.status(400).json({ error: "Tell dispatch what happened." });
+    const db = ensure();
+    const order = activeOrder(db, req.driver.id);
+    update((current) => {
+      audit(current, { actorId: req.driver.id, action: `safety_${kind}`, note: note.slice(0, 240), orderId: order ? order.id : undefined });
     });
-    res.json({ ok: true, message: "Dispatch has the time and your report." });
+    res.json({
+      ok: true,
+      type: kind,
+      message: kind === "share" ? "Trip share is ready." : "Dispatch has the time and your report.",
+      sharePath: order ? `/track/${order.trackingToken}` : null,
+    });
   });
 
   app.get("/restaurant/orders", auth("owner", "manager", "counter"), (req, res) => {
@@ -895,10 +1034,28 @@ function createApp() {
     };
     if (req.accepts(["html", "json"]) === "html") {
       return res.send(
-        trackPage(`${payload.restaurantName}. Driver: ${payload.driverFirstName}. Status: ${payload.status}.`)
+        trackPage(
+          `${payload.restaurantName}. Driver: ${payload.driverFirstName}. Status: ${payload.status}.`,
+          order.trackingToken
+        )
       );
     }
     res.json(payload);
+  });
+
+  app.get("/track/:token/thumb", (req, res) => {
+    const vote = req.query.vote === "down" ? "down" : "up";
+    const result = update((db) => {
+      const order = db.orders.find((item) => item.trackingToken === req.params.token);
+      if (!order || ["delivered", "cancelled", "returned"].includes(order.status)) {
+        return { error: "This tracking link has expired.", status: 404 };
+      }
+      order.customerThumb = vote;
+      audit(db, { actorId: "customer", action: "customer_thumb", orderId: order.id, note: vote });
+      return { ok: true };
+    });
+    if (result.error) return res.status(result.status).send(trackPage(result.error));
+    res.send(trackPage(vote === "up" ? "Thanks. The restaurant can see your thumbs-up." : "Thanks. Dispatch can see your thumbs-down."));
   });
 
   app.get("/admin", (_req, res) => {
@@ -1125,11 +1282,17 @@ function publicStaff(person, db) {
   };
 }
 
-function publicLevel(driver) {
+function publicLevel(driver, db, rolling) {
+  const events = db && db.levelEvents ? db.levelEvents.filter((item) => item.driverId === driver.id) : [];
   return {
     level: driver.level,
     lifetimeCompleted: driver.lifetimeCompleted,
     next: rules.nextLevel(driver.lifetimeCompleted),
+    paused: Boolean(driver.paused),
+    atRiskSince: driver.atRiskSince || null,
+    advisorySeat: driver.level === "diamond",
+    rolling: rolling || null,
+    history: events.slice(-8).reverse(),
     quality: {
       ratingAvg: driver.ratingAvg,
       ratingCount: driver.ratingCount,
@@ -1149,7 +1312,7 @@ function rewardsFor(level) {
     ["silver", "Book shifts 24 hours early, 2 free instant cash-outs a week"],
     ["gold", "Book shifts 48 hours early, first look at open requests, free instant cash-out"],
     ["platinum", "Extra $0.25 per delivery and up to 3 favorite restaurants"],
-    ["diamond", "Extra $0.50 per delivery and a driver advisory seat"],
+    ["diamond", "Extra $0.50 per delivery, a $2 mentoring bonus, and a driver advisory seat"],
   ];
   const rank = rules.LEVEL_RANK[level];
   return all.filter((_, index) => index <= rank).map((item) => item[1]);
@@ -1211,7 +1374,12 @@ function matchWaiting(db, preferred) {
         !(order.declines || []).includes(driver.id) &&
         rules.canSeeOpenRequest(driver.level, order.requestedAt)
     );
-    pool.sort((a, b) => rules.LEVEL_RANK[b.level] - rules.LEVEL_RANK[a.level]);
+    pool.sort((a, b) => {
+      const rank = rules.LEVEL_RANK[b.level] - rules.LEVEL_RANK[a.level];
+      if (rank) return rank;
+      const favorite = (person) => ((person.preferences && person.preferences.favorites) || []).includes(order.restaurantId) ? 1 : 0;
+      return favorite(b) - favorite(a);
+    });
     const chosen = preferred && pool.some((driver) => driver.id === preferred.id) ? preferred : pool[0];
     if (!chosen) continue;
     if (db.offers.some((offer) => offer.driverId === chosen.id && offer.status === "pending")) continue;
@@ -1243,6 +1411,10 @@ function acceptOffer(db, driver, offerId) {
   offer.status = "accepted";
   order.driverId = driver.id;
   order.status = "accepted";
+  if (order.pay.levelBonus == null) {
+    order.pay.levelBonus = rules.levelBonus(driver.level);
+    order.pay.driverTotal = rules.round(order.pay.driverTotal + order.pay.levelBonus);
+  }
   db.offers.forEach((item) => {
     if (item.orderId === order.id && item.id !== offer.id && item.status === "pending") item.status = "cancelled";
   });
@@ -1258,20 +1430,33 @@ function openRequestsFor(db, driver) {
     .filter((order) => allows(driver, order))
     .map((order) => ({
       orderId: order.id,
-      ...driverView(db, order, false),
+      ...driverView(db, order, false, driver),
     }));
 }
 
 function offerPayload(db, offer) {
   const order = db.orders.find((item) => item.id === offer.orderId);
+  const driver = db.drivers.find((item) => item.id === offer.driverId);
   return {
     offerId: offer.id,
     expiresAt: offer.expiresAt,
-    order: driverView(db, order, false),
+    order: driverView(db, order, false, driver),
   };
 }
 
-function driverView(db, order, active) {
+function payFor(order, driver) {
+  if (!driver) return order.pay;
+  const bonus = rules.levelBonus(driver.level);
+  const already = Number(order.pay.levelBonus || 0);
+  const extra = Math.max(0, rules.round(bonus - already));
+  return {
+    ...order.pay,
+    levelBonus: Math.max(already, bonus),
+    driverTotal: rules.round(order.pay.driverTotal + extra),
+  };
+}
+
+function driverView(db, order, active, driver) {
   const restaurant = restaurantById(db, order.restaurantId);
   const revealed = active && ["picked_up", "waiting_customer", "delivered", "returned"].includes(order.status);
   const view = {
@@ -1288,7 +1473,7 @@ function driverView(db, order, active) {
     large: order.large,
     readyAt: order.readyAt,
     distanceMiles: order.distanceMiles,
-    pay: order.pay,
+    pay: payFor(order, driver),
     kitchenLate: Boolean(order.kitchenLate),
     notes: revealed ? order.notes : undefined,
     customerFirstName: revealed ? order.customerName.split(" ")[0] : undefined,
@@ -1454,9 +1639,12 @@ if (token) show();
 </script></body></html>`;
 }
 
-function trackPage(message) {
+function trackPage(message, token) {
   const safe = String(message).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
-  return `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Pop-Drivers tracking</title></head><body style="font-family:Georgia,serif;background:#f3f0e8;color:#1c2b24;padding:32px"><h1>Pop-Drivers</h1><p>${safe}</p></body></html>`;
+  const buttons = token
+    ? `<p><a href="/track/${token}/thumb?vote=up">Thumbs up</a> · <a href="/track/${token}/thumb?vote=down">Thumbs down</a></p>`
+    : "";
+  return `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Pop-Drivers tracking</title></head><body style="font-family:Georgia,serif;background:#f3f0e8;color:#1c2b24;padding:32px"><h1>Pop-Drivers</h1><p>${safe}</p>${buttons}</body></html>`;
 }
 
 if (require.main === module) {
