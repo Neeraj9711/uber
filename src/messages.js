@@ -21,6 +21,7 @@ const EXACT = {
   "Confirm that you are at the restaurant first.": ["Primero confirma que estás en el restaurante.", "请先确认你已在餐厅。"],
   "Complete the pickup checklist.": ["Completa la lista de recogida.", "请完成取餐核对。"],
   "No active delivery.": ["No hay una entrega activa.", "没有进行中的配送。"],
+  "Call the restaurant during pickup.": ["Llama al restaurante durante la recogida.", "请在取餐时致电餐厅。"],
   "Write a message first.": ["Escribe un mensaje primero.", "请先写一条消息。"],
   "Mentoring pay is for Diamond drivers.": ["El pago de mentor es para conductores Diamond.", "带教补贴只给钻石司机。"],
   "Mentoring pay is already on this order.": ["El pago de mentor ya está en este pedido.", "这笔订单已经有带教补贴。"],

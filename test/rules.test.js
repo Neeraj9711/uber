@@ -18,6 +18,8 @@ assert.strictEqual(rules.levelFor(150), "gold");
 assert.strictEqual(rules.levelFor(300), "platinum");
 assert.strictEqual(rules.levelFor(500), "diamond");
 assert.strictEqual(rules.nextLevel(112).remaining, 38);
+assert.strictEqual(rules.nextLevel(112).from, 100);
+assert.strictEqual(rules.estimateMinutes(2.2), 17);
 
 assert.strictEqual(rules.canSeeOpenRequest("gold", new Date().toISOString()), true);
 assert.strictEqual(rules.canSeeOpenRequest("silver", new Date().toISOString()), false);

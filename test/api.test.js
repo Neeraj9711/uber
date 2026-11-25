@@ -306,8 +306,15 @@ async function main() {
   });
   assert.strictEqual(onlineAgain.status, 200);
   assert.ok(onlineAgain.data.offer);
+  assert.strictEqual(typeof onlineAgain.data.offer.order.estimatedMinutes, "number");
   const taken = await call(`/driver/offers/${onlineAgain.data.offer.offerId}/accept`, { method: "POST", token });
   assert.strictEqual(taken.status, 200);
+  const restaurantCall = await call("/driver/delivery/call-restaurant", { method: "POST", token });
+  assert.strictEqual(restaurantCall.status, 200);
+  assert.ok(String(restaurantCall.data.dial).startsWith("tel:"));
+  const supportCall = await call("/driver/support/call", { method: "POST", token });
+  assert.strictEqual(supportCall.status, 200);
+  assert.strictEqual(supportCall.data.display, "(415) 555-0199");
   const share = await call("/driver/safety/report", { method: "POST", token, body: { type: "share", note: "" } });
   assert.strictEqual(share.status, 200);
   assert.ok(share.data.sharePath);

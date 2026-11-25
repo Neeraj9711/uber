@@ -10,6 +10,8 @@ const { storePrivatePhoto } = require("./photos");
 const DEMO = process.env.DEMO_MODE !== "false";
 const SECRET = process.env.JWT_SECRET || "pop-drivers-dev-secret";
 const MASKED_DIAL = "4155550136";
+const RESTAURANT_DIAL = "4155550148";
+const SUPPORT_DIAL = "4155550199";
 
 function createApp() {
   ensure();
@@ -444,6 +446,22 @@ function createApp() {
     if (!order) return res.status(404).json({ error: "No active delivery." });
     update((current) => audit(current, { actorId: req.driver.id, action: "masked_call", orderId: order.id }));
     res.json({ display: "(415) 555-0136", dial: `tel:${MASKED_DIAL}` });
+  });
+
+  app.post("/driver/delivery/call-restaurant", auth("driver"), (req, res) => {
+    const db = ensure();
+    const order = activeOrder(db, req.driver.id);
+    if (!order) return res.status(404).json({ error: "No active delivery." });
+    if (order.status !== "accepted" && order.status !== "at_pickup") {
+      return res.status(400).json({ error: "Call the restaurant during pickup." });
+    }
+    update((current) => audit(current, { actorId: req.driver.id, action: "masked_restaurant_call", orderId: order.id }));
+    res.json({ display: "(415) 555-0148", dial: `tel:${RESTAURANT_DIAL}` });
+  });
+
+  app.post("/driver/support/call", auth("driver"), (req, res) => {
+    update((current) => audit(current, { actorId: req.driver.id, action: "support_call" }));
+    res.json({ display: "(415) 555-0199", dial: `tel:${SUPPORT_DIAL}` });
   });
 
   app.post("/driver/delivery/text", auth("driver"), (req, res) => {
@@ -1556,6 +1574,7 @@ function driverView(db, order, active, driver) {
     large: order.large,
     readyAt: order.readyAt,
     distanceMiles: order.distanceMiles,
+    estimatedMinutes: rules.estimateMinutes(order.distanceMiles),
     pay: payFor(order, driver),
     kitchenLate: Boolean(order.kitchenLate),
     notes: revealed ? order.notes : undefined,

@@ -31,12 +31,19 @@ const NEXT_LEVEL = [
 
 function nextLevel(count) {
   const completed = Number(count) || 0;
+  let from = 0;
   for (const step of NEXT_LEVEL) {
     if (completed < step.at) {
-      return { name: step.name, at: step.at, remaining: step.at - completed };
+      return { name: step.name, at: step.at, remaining: step.at - completed, from };
     }
+    from = step.at;
   }
-  return { name: "diamond", at: 500, remaining: 0 };
+  return { name: "diamond", at: 500, remaining: 0, from: 500 };
+}
+
+function estimateMinutes(distanceMiles) {
+  const miles = Math.max(0, Number(distanceMiles) || 0);
+  return Math.max(12, Math.round((miles / 18) * 60 + 10));
 }
 
 function quoteDelivery({ distanceMiles, tip = 0, alcohol = false, large = false, rush = false }) {
@@ -254,6 +261,7 @@ module.exports = {
   levelFor,
   LEVEL_RANK,
   nextLevel,
+  estimateMinutes,
   quoteDelivery,
   distanceMilesForAddress,
   areaFromAddress,
