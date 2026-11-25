@@ -1669,6 +1669,7 @@ function driverView(db, order, active, driver) {
     alcohol: order.alcohol,
     large: order.large,
     readyAt: order.readyAt,
+    kitchenReady: Boolean(order.kitchenReady),
     distanceMiles: order.distanceMiles,
     estimatedMinutes: rules.estimateMinutes(order.distanceMiles),
     pay: payFor(order, driver),
