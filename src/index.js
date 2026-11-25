@@ -4,6 +4,8 @@ const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const { ensure, update } = require("./store");
 const rules = require("./rules");
+const { localize } = require("./messages");
+const { storePrivatePhoto } = require("./photos");
 
 const DEMO = process.env.DEMO_MODE !== "false";
 const SECRET = process.env.JWT_SECRET || "pop-drivers-dev-secret";
@@ -16,14 +18,16 @@ function createApp() {
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Referrer-Policy", "no-referrer");
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Pop-Signature");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Pop-Signature, Accept-Language");
     res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
     if (req.method === "OPTIONS") return res.sendStatus(204);
+    const send = res.json.bind(res);
+    res.json = (body) => send(localize(req, body));
     next();
   });
   app.use(
     express.json({
-      limit: "1mb",
+      limit: "6mb",
       verify: (req, _res, buf) => {
         req.rawBody = buf;
       },
@@ -90,6 +94,7 @@ function createApp() {
       const otp = [...db.otps].reverse().find((item) => item.phone === phone);
       const driver = db.drivers.find((item) => item.phone === phone);
       const generic = { error: "Could not sign in.", status: 401 };
+      if (driver && driver.status === "deleted") return { error: "This account was deleted.", status: 401 };
       if (!otp || !driver) return generic;
       if (new Date(otp.expiresAt).getTime() < Date.now() || otp.attempts >= 5) return generic;
       otp.attempts += 1;
@@ -142,6 +147,7 @@ function createApp() {
     if (!email || !password) return res.status(400).json({ error: "Enter your email and password." });
     const result = update((db) => {
       const driver = db.drivers.find((item) => item.email && item.email.toLowerCase() === email);
+      if (driver && driver.status === "deleted") return { error: "This account was deleted.", status: 401 };
       if (!driver || !driver.passwordHash || !bcrypt.compareSync(password, driver.passwordHash)) {
         return { error: "Could not sign in.", status: 401 };
       }
@@ -489,13 +495,18 @@ function createApp() {
       const blocked = rules.deviceProblem(req.body);
       if (blocked) return { error: blocked, status: 403 };
       const type = req.body.type === "handoff" ? "handoff" : "photo";
-      const rawPhoto = String(req.body.photoBase64 || "").replace(/^data:image\/\w+;base64,/, "");
+      let stored = null;
+      if (type === "photo") {
+        stored = storePrivatePhoto(req.body.photoBase64);
+        if (stored.error) return { error: stored.error, status: 400 };
+      }
       order.proof = {
         type,
         metadataStripped: true,
-        reencoded: true,
-        storedPrivately: true,
-        sha256: rawPhoto ? crypto.createHash("sha256").update(rawPhoto).digest("hex") : null,
+        reencoded: type === "photo",
+        storedPrivately: type === "photo",
+        sha256: stored ? stored.sha256 : null,
+        privateId: stored ? stored.id : null,
       };
       order.locationChecks.dropoff = true;
       order.status = "delivered";
@@ -799,19 +810,91 @@ function createApp() {
 
   app.post("/driver/safety/report", auth("driver"), (req, res) => {
     const note = String(req.body.note || "").trim();
-    const kind = ["incident", "unsafe_address", "restaurant", "share"].includes(req.body.type) ? req.body.type : "incident";
-    if (kind !== "share" && note.length < 3) return res.status(400).json({ error: "Tell dispatch what happened." });
+    const kind = ["incident", "unsafe_address", "restaurant", "share", "emergency"].includes(req.body.type) ? req.body.type : "incident";
+    if (kind !== "share" && kind !== "emergency" && note.length < 3) {
+      return res.status(400).json({ error: "Tell dispatch what happened." });
+    }
     const db = ensure();
     const order = activeOrder(db, req.driver.id);
+    const here = point(req.body);
+    const reportedAt = new Date().toISOString();
     update((current) => {
+      current.safetyReports = current.safetyReports || [];
+      current.safetyReports.push({
+        id: crypto.randomUUID(),
+        driverId: req.driver.id,
+        type: kind,
+        note: note.slice(0, 240),
+        at: reportedAt,
+        location: here,
+        orderId: order ? order.id : null,
+      });
       audit(current, { actorId: req.driver.id, action: `safety_${kind}`, note: note.slice(0, 240), orderId: order ? order.id : undefined });
     });
     res.json({
       ok: true,
       type: kind,
-      message: kind === "share" ? "Trip share is ready." : "Dispatch has the time and your report.",
+      reportedAt,
+      location: here,
+      dial: kind === "emergency" ? "tel:911" : null,
+      message: kind === "share"
+        ? "Trip share is ready."
+        : kind === "emergency"
+          ? "Emergency services can be called from this phone. Dispatch has the time and place."
+          : "Dispatch has the time and your report.",
       sharePath: order ? `/track/${order.trackingToken}` : null,
     });
+  });
+
+  app.get("/driver/dispatch/chat", auth("driver"), (req, res) => {
+    const db = ensure();
+    res.json({ messages: chatFor(db, req.driver.id) });
+  });
+
+  app.post("/driver/dispatch/chat", auth("driver"), (req, res) => {
+    const text = String(req.body.text || "").trim();
+    if (text.length < 1) return res.status(400).json({ error: "Write a message first." });
+    const result = update((db) => {
+      const driver = fresh(db, req);
+      db.dispatchMessages = db.dispatchMessages || [];
+      db.dispatchMessages.push({
+        id: crypto.randomUUID(),
+        driverId: driver.id,
+        from: "driver",
+        text: text.slice(0, 500),
+        at: new Date().toISOString(),
+      });
+      audit(db, { actorId: driver.id, action: "dispatch_message" });
+      return { messages: chatFor(db, driver.id) };
+    });
+    res.json(result);
+  });
+
+  app.post("/driver/account/delete", auth("driver"), (req, res) => {
+    if (String(req.body.confirm || "") !== "DELETE") {
+      return res.status(400).json({ error: "Type DELETE to confirm." });
+    }
+    const result = update((db) => {
+      const driver = fresh(db, req);
+      if (activeOrder(db, driver.id)) {
+        return { error: "Finish or return the active delivery before deleting the account.", status: 409 };
+      }
+      driver.status = "deleted";
+      driver.deletedAt = new Date().toISOString();
+      driver.email = `deleted+${driver.id}@pop-drivers.invalid`;
+      driver.phone = "";
+      driver.name = "Deleted driver";
+      driver.firstName = "Deleted";
+      driver.passwordHash = "";
+      driver.online = false;
+      driver.sessionVersion += 1;
+      driver.bankLast4 = null;
+      driver.pendingPayout = null;
+      audit(db, { actorId: driver.id, action: "account_deleted" });
+      return { deleted: true };
+    });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.json(result);
   });
 
   app.get("/restaurant/orders", auth("owner", "manager", "counter"), (req, res) => {
@@ -1047,7 +1130,7 @@ function createApp() {
       drivers: db.drivers.map((driver) => ({
         id: driver.id,
         name: driver.name,
-        phoneLast4: driver.phone.slice(-4),
+        phoneLast4: String(driver.phone || "").slice(-4),
         status: driver.status,
         level: driver.level,
         lifetimeCompleted: driver.lifetimeCompleted,
@@ -1062,6 +1145,27 @@ function createApp() {
       driver.status = "approved";
       audit(db, { actorId: req.user.sub, action: "driver_approved", targetId: driver.id });
       return { driver: { id: driver.id, status: driver.status } };
+    });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.json(result);
+  });
+
+  app.post("/admin/drivers/:id/dispatch", auth("admin"), (req, res) => {
+    const text = String(req.body.text || "").trim();
+    if (text.length < 1) return res.status(400).json({ error: "Write a message first." });
+    const result = update((db) => {
+      const driver = db.drivers.find((item) => item.id === req.params.id);
+      if (!driver) return { error: "Driver not found.", status: 404 };
+      db.dispatchMessages = db.dispatchMessages || [];
+      db.dispatchMessages.push({
+        id: crypto.randomUUID(),
+        driverId: driver.id,
+        from: "dispatch",
+        text: text.slice(0, 500),
+        at: new Date().toISOString(),
+      });
+      audit(db, { actorId: req.user.sub, action: "dispatch_reply", targetId: driver.id });
+      return { messages: chatFor(db, driver.id) };
     });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.json(result);
@@ -1467,6 +1571,13 @@ function driverView(db, order, active, driver) {
   return view;
 }
 
+function chatFor(db, driverId) {
+  return (db.dispatchMessages || [])
+    .filter((item) => item.driverId === driverId)
+    .sort((a, b) => new Date(a.at) - new Date(b.at))
+    .map((item) => ({ id: item.id, from: item.from, text: item.text, at: item.at }));
+}
+
 function activeOrder(db, driverId) {
   return db.orders.find(
     (order) =>
@@ -1611,7 +1722,7 @@ function adminPage() {
 <script>
 let token = sessionStorage.getItem('pop_admin') || '';
 const api = (path, opts={}) => fetch(path, { ...opts, headers: { 'Content-Type':'application/json', ...(token?{Authorization:'Bearer '+token}:{}) , ...(opts.headers||{}) }, body: opts.body ? JSON.stringify(opts.body) : undefined }).then(async r => { const d = await r.json(); if(!r.ok) throw new Error(d.error||'Error'); return d; });
-async function show(){ if(!token) return; document.getElementById('login').hidden = true; document.getElementById('app').hidden = false; const data = await api('/admin/drivers'); const audit = await api('/admin/audit'); document.getElementById('rows').innerHTML = '<tr><th>Name</th><th>Status</th><th>Level</th><th></th></tr>' + data.drivers.map(d => '<tr><td>'+d.name+'</td><td>'+d.status+'</td><td>'+d.level+' · '+d.lifetimeCompleted+'</td><td>'+(d.status!=='approved'?'<button data-id="'+d.id+'">Approve</button>':'')+'</td></tr>').join(''); document.getElementById('log').textContent = audit.audit.map(a => a.at+' '+a.action).join('\\n'); document.querySelectorAll('button[data-id]').forEach(btn => btn.onclick = async () => { await api('/admin/drivers/'+btn.dataset.id+'/approve', { method:'POST', body:{} }); show(); }); }
+async function show(){ if(!token) return; document.getElementById('login').hidden = true; document.getElementById('app').hidden = false; const data = await api('/admin/drivers'); const audit = await api('/admin/audit'); document.getElementById('rows').innerHTML = '<tr><th>Name</th><th>Status</th><th>Level</th><th></th></tr>' + data.drivers.map(d => '<tr><td>'+d.name+'</td><td>'+d.status+'</td><td>'+d.level+' · '+d.lifetimeCompleted+'</td><td><button data-reply="'+d.id+'">Reply</button>'+(d.status!=='approved'?' <button data-id="'+d.id+'">Approve</button>':'')+'</td></tr>').join(''); document.getElementById('log').textContent = audit.audit.map(a => a.at+' '+a.action).join('\\n'); document.querySelectorAll('button[data-id]').forEach(btn => btn.onclick = async () => { await api('/admin/drivers/'+btn.dataset.id+'/approve', { method:'POST', body:{} }); show(); }); document.querySelectorAll('button[data-reply]').forEach(btn => btn.onclick = async () => { const text = prompt('Message to this driver'); if (!text) return; await api('/admin/drivers/'+btn.dataset.reply+'/dispatch', { method:'POST', body:{ text } }); }); }
 document.getElementById('go').onclick = async () => { const data = await api('/auth/admin/login', { method:'POST', body:{ email: email.value, password: password.value } }); token = data.token; sessionStorage.setItem('pop_admin', token); show(); };
 document.getElementById('out').onclick = () => { token=''; sessionStorage.removeItem('pop_admin'); location.reload(); };
 if (token) show();

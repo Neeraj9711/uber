@@ -313,6 +313,14 @@ function ensure() {
     db.qualitySnapshots = [];
     changed = true;
   }
+  if (!Array.isArray(db.dispatchMessages)) {
+    db.dispatchMessages = [];
+    changed = true;
+  }
+  if (!Array.isArray(db.safetyReports)) {
+    db.safetyReports = [];
+    changed = true;
+  }
   if (changed) save(db);
   return db;
 }

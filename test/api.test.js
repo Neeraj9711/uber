@@ -177,12 +177,15 @@ async function main() {
   });
   assert.strictEqual(proofFar.status, 400);
 
+  const jpeg = require("jpeg-js");
+  const door = jpeg.encode({ data: Buffer.alloc(16, 200), width: 2, height: 2 }, 60);
   const proof = await call("/driver/delivery/proof", {
     method: "POST",
     token: driver,
-    body: { type: "photo", ...picked.data.delivery.stop.point },
+    body: { type: "photo", photoBase64: Buffer.from(door.data).toString("base64"), ...picked.data.delivery.stop.point },
   });
   assert.strictEqual(proof.status, 200);
+  assert.ok(!JSON.stringify(proof.data).includes("privateId"));
   assert.strictEqual(proof.data.level.lifetimeCompleted, 113);
   assert.strictEqual(proof.data.delivery.area, "Hidden");
 
@@ -320,6 +323,60 @@ async function main() {
   const levelView = await call("/driver/level", { token });
   assert.ok(Array.isArray(levelView.data.ratings));
   assert.ok(Array.isArray(levelView.data.latePickups));
+
+  const spanish = await call("/auth/driver/login", {
+    method: "POST",
+    headers: { "accept-language": "es" },
+    body: { email: "missing@example.com", password: "nope" },
+  });
+  assert.strictEqual(spanish.status, 401);
+  assert.strictEqual(spanish.data.error, "No se pudo entrar.");
+  const chinese = await call("/driver/level", { token, headers: { "accept-language": "zh" } });
+  assert.ok(chinese.data.rewards.some((item) => String(item).includes("周四")));
+
+  const chatSignup = await call("/auth/driver/signup", {
+    method: "POST",
+    body: { name: "Chat Driver", email: "chat-driver@example.com", password: "PopDrivers123!", deviceId: "chat-phone" },
+  });
+  assert.strictEqual(chatSignup.status, 201);
+  const chatToken = chatSignup.data.token;
+  const posted = await call("/driver/dispatch/chat", {
+    method: "POST",
+    token: chatToken,
+    body: { text: "Where is the restaurant door?" },
+  });
+  assert.strictEqual(posted.status, 200);
+  assert.strictEqual(posted.data.messages[0].from, "driver");
+  assert.strictEqual(posted.data.messages[0].text, "Where is the restaurant door?");
+  const emergency = await call("/driver/safety/report", {
+    method: "POST",
+    token: chatToken,
+    body: { type: "emergency", note: "Emergency call", lat: 37.77, lng: -122.42 },
+  });
+  assert.strictEqual(emergency.status, 200);
+  assert.strictEqual(emergency.data.dial, "tel:911");
+  assert.ok(emergency.data.reportedAt);
+  assert.strictEqual(emergency.data.location.lat, 37.77);
+  const removed = await call("/driver/account/delete", { method: "POST", token: chatToken, body: { confirm: "DELETE" } });
+  assert.strictEqual(removed.status, 200);
+  assert.strictEqual(removed.data.deleted, true);
+  const signedOut = await call("/driver/dispatch/chat", { token: chatToken });
+  assert.strictEqual(signedOut.status, 401);
+
+  const fs = require("fs");
+  const photoPath = require("path");
+  const { storePrivatePhoto, reencode, privateDir } = require("../src/photos");
+  const photoRaw = jpeg.encode({ data: Buffer.alloc(16, 255), width: 2, height: 2 }, 50);
+  const exif = Buffer.from([0xff, 0xe1, 0x00, 0x08, 0x45, 0x78, 0x69, 0x66, 0x00, 0x00]);
+  const marked = Buffer.concat([Buffer.from(photoRaw.data).subarray(0, 2), exif, Buffer.from(photoRaw.data).subarray(2)]);
+  assert.ok(marked.includes(Buffer.from("Exif")));
+  const clean = reencode(marked);
+  assert.ok(!clean.includes(Buffer.from("Exif")));
+  const stored = storePrivatePhoto(marked.toString("base64"));
+  assert.ok(stored.sha256);
+  const saved = fs.readFileSync(photoPath.join(privateDir(), `${stored.id}.jpg`));
+  assert.ok(!saved.includes(Buffer.from("Exif")));
+  assert.ok(!JSON.stringify(stored).includes("photoBase64"));
 
   server.close();
   console.log("api ok");
