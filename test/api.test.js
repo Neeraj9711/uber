@@ -225,6 +225,40 @@ async function main() {
   });
   assert.strictEqual(duplicate.status, 409);
 
+  const shortRestaurant = await call("/auth/restaurant/signup", {
+    method: "POST",
+    body: { name: "Ada", restaurantName: "Ada Cafe", email: "ada-cafe@example.com", password: "short" },
+  });
+  assert.strictEqual(shortRestaurant.status, 400);
+
+  const cafe = await call("/auth/restaurant/signup", {
+    method: "POST",
+    body: { name: "Ada Lovelace", restaurantName: "Ada Cafe", email: "ada-cafe@example.com", password: "PopDrivers123!" },
+  });
+  assert.strictEqual(cafe.status, 201);
+  assert.strictEqual(cafe.data.staff.role, "owner");
+  assert.strictEqual(cafe.data.staff.restaurantName, "Ada Cafe");
+
+  const duplicateCafe = await call("/auth/restaurant/signup", {
+    method: "POST",
+    body: { name: "Ada", restaurantName: "Ada Cafe", email: "ada-cafe@example.com", password: "PopDrivers123!" },
+  });
+  assert.strictEqual(duplicateCafe.status, 409);
+
+  const badCafe = await call("/auth/restaurant/email-login", {
+    method: "POST",
+    body: { email: "ada-cafe@example.com", password: "PopDrivers999!" },
+  });
+  assert.strictEqual(badCafe.status, 401);
+
+  const cafeLogin = await call("/auth/restaurant/email-login", {
+    method: "POST",
+    body: { email: "owner@papas.example", password: "PopDrivers123!" },
+  });
+  assert.strictEqual(cafeLogin.status, 200);
+  assert.strictEqual(cafeLogin.data.staff.restaurantName, "Papa's Pizza");
+  assert.strictEqual(cafeLogin.data.staff.role, "owner");
+
   server.close();
   console.log("api ok");
 }

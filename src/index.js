@@ -138,15 +138,75 @@ function createApp() {
     res.json(result);
   });
 
+  app.post("/auth/restaurant/signup", (req, res) => {
+    const email = normalizeEmail(req.body.email);
+    const password = String(req.body.password || "");
+    const name = String(req.body.name || "").trim();
+    const restaurantName = String(req.body.restaurantName || "").trim();
+    const passwordError = restaurantPasswordError(password);
+    if (!email) return res.status(400).json({ error: "Enter an email address." });
+    if (passwordError) return res.status(400).json({ error: passwordError });
+    if (!name) return res.status(400).json({ error: "Enter your name." });
+    if (restaurantName.length < 2) return res.status(400).json({ error: "Enter the restaurant name." });
+    const result = update((db) => {
+      if (db.staff.some((item) => item.email === email)) {
+        return { error: "That email is already in use.", status: 409 };
+      }
+      const restaurant = {
+        id: crypto.randomUUID(),
+        name: restaurantName.slice(0, 80),
+        zone: "mission",
+        location: { lat: 37.7749, lng: -122.4194 },
+        address: "San Francisco",
+        phone: "",
+        posSecret: crypto.randomBytes(16).toString("hex"),
+        posConnected: false,
+        posProvider: null,
+      };
+      const person = {
+        id: crypto.randomUUID(),
+        restaurantId: restaurant.id,
+        name: name.slice(0, 80),
+        email,
+        role: "owner",
+        pinHash: bcrypt.hashSync("1111", 8),
+        passwordHash: bcrypt.hashSync(password, 8),
+        sessionVersion: 1,
+        active: true,
+      };
+      db.restaurants.push(restaurant);
+      db.staff.push(person);
+      audit(db, { actorId: person.id, action: "restaurant_email_signup", restaurantId: restaurant.id });
+      return { token: signToken(staffToken(person)), staff: publicStaff(person, db) };
+    });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.status(201).json(result);
+  });
+
+  app.post("/auth/restaurant/email-login", (req, res) => {
+    const email = normalizeEmail(req.body.email);
+    const password = String(req.body.password || "");
+    if (!email || !password) return res.status(400).json({ error: "Enter your email and password." });
+    const passwordError = restaurantPasswordError(password);
+    if (passwordError) return res.status(400).json({ error: passwordError });
+    const result = update((db) => {
+      const person = db.staff.find((item) => item.email === email && item.active);
+      if (!person || !bcrypt.compareSync(password, person.passwordHash)) {
+        return { error: "Could not sign in.", status: 401 };
+      }
+      person.sessionVersion += 1;
+      audit(db, { actorId: person.id, action: "restaurant_email_sign_in", restaurantId: person.restaurantId });
+      return { token: signToken(staffToken(person)), staff: publicStaff(person, db) };
+    });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.json(result);
+  });
+
   app.post("/auth/restaurant/login", (req, res) => {
     const email = String(req.body.email || "").toLowerCase().trim();
     const password = String(req.body.password || "");
-    if (password.length < 12) {
-      return res.status(400).json({ error: "Use a password of at least 12 characters." });
-    }
-    if (password.toLowerCase() === "password123456") {
-      return res.status(400).json({ error: "Choose a password that is not a known breach." });
-    }
+    const passwordError = restaurantPasswordError(password);
+    if (passwordError) return res.status(400).json({ error: passwordError });
     const result = update((db) => {
       const person = db.staff.find((item) => item.email === email && item.active);
       if (!person || !bcrypt.compareSync(password, person.passwordHash)) {
@@ -977,6 +1037,12 @@ function normalizePhone(value) {
   const digits = String(value || "").replace(/[^\d+]/g, "");
   if (digits.replace(/\D/g, "").length < 10) return "";
   return digits.startsWith("+") ? digits : `+${digits}`;
+}
+
+function restaurantPasswordError(password) {
+  if (password.length < 12) return "Use a password of at least 12 characters.";
+  if (password.toLowerCase() === "password123456") return "Choose a password that is not a known breach.";
+  return "";
 }
 
 function normalizeEmail(value) {
