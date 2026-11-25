@@ -321,6 +321,10 @@ function ensure() {
     db.safetyReports = [];
     changed = true;
   }
+  if (!Array.isArray(db.paymentIssues)) {
+    db.paymentIssues = [];
+    changed = true;
+  }
   if (changed) save(db);
   return db;
 }

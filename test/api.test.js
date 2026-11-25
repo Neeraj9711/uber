@@ -315,6 +315,20 @@ async function main() {
   const supportCall = await call("/driver/support/call", { method: "POST", token });
   assert.strictEqual(supportCall.status, 200);
   assert.strictEqual(supportCall.data.display, "(415) 555-0199");
+  assert.strictEqual(supportCall.data.priority, false);
+  const payIssue = await call("/driver/support/payment", {
+    method: "POST",
+    token,
+    body: { note: "Thursday payout is short", amount: 4 },
+  });
+  assert.strictEqual(payIssue.status, 200);
+  assert.strictEqual(payIssue.data.message, "Dispatch has this payment report.");
+  const cardNote = await call("/driver/support/payment", {
+    method: "POST",
+    token,
+    body: { note: "card 4111 1111 1111 1111" },
+  });
+  assert.strictEqual(cardNote.status, 400);
   const share = await call("/driver/safety/report", { method: "POST", token, body: { type: "share", note: "" } });
   assert.strictEqual(share.status, 200);
   assert.ok(share.data.sharePath);
@@ -364,6 +378,26 @@ async function main() {
   assert.strictEqual(emergency.data.dial, "tel:911");
   assert.ok(emergency.data.reportedAt);
   assert.strictEqual(emergency.data.location.lat, 37.77);
+  const starterLine = await call("/driver/support/call", { method: "POST", token: chatToken });
+  assert.strictEqual(starterLine.data.priority, false);
+  const admin = await call("/auth/admin/login", {
+    method: "POST",
+    body: { email: "admin@popdrivers.example", password: "PopDrivers123!" },
+  });
+  assert.strictEqual(admin.status, 200);
+  const who = await call("/me", { token: chatToken });
+  const raised = await call(`/admin/drivers/${who.data.driver.id}/level`, {
+    method: "POST",
+    token: admin.data.token,
+    body: { level: "gold", reason: "priority line check" },
+  });
+  assert.strictEqual(raised.status, 200);
+  const goldLine = await call("/driver/support/call", { method: "POST", token: chatToken });
+  assert.strictEqual(goldLine.status, 200);
+  assert.strictEqual(goldLine.data.display, "(415) 555-0188");
+  assert.strictEqual(goldLine.data.priority, true);
+  const desk = await call("/admin/payment-issues", { token: admin.data.token });
+  assert.ok(desk.data.issues.some((item) => item.note === "Thursday payout is short"));
   const removed = await call("/driver/account/delete", { method: "POST", token: chatToken, body: { confirm: "DELETE" } });
   assert.strictEqual(removed.status, 200);
   assert.strictEqual(removed.data.deleted, true);

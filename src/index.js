@@ -12,6 +12,7 @@ const SECRET = process.env.JWT_SECRET || "pop-drivers-dev-secret";
 const MASKED_DIAL = "4155550136";
 const RESTAURANT_DIAL = "4155550148";
 const SUPPORT_DIAL = "4155550199";
+const PRIORITY_DIAL = "4155550188";
 
 function createApp() {
   ensure();
@@ -459,9 +460,62 @@ function createApp() {
     res.json({ display: "(415) 555-0148", dial: `tel:${RESTAURANT_DIAL}` });
   });
 
+  app.get("/driver/support", auth("driver"), (req, res) => {
+    const driver = ensure().drivers.find((item) => item.id === req.driver.id);
+    res.json(supportLine(driver));
+  });
+
   app.post("/driver/support/call", auth("driver"), (req, res) => {
-    update((current) => audit(current, { actorId: req.driver.id, action: "support_call" }));
-    res.json({ display: "(415) 555-0199", dial: `tel:${SUPPORT_DIAL}` });
+    const driver = ensure().drivers.find((item) => item.id === req.driver.id);
+    const line = supportLine(driver);
+    update((current) => audit(current, { actorId: req.driver.id, action: line.priority ? "priority_support_call" : "support_call" }));
+    res.json(line);
+  });
+
+  app.get("/driver/support/payment", auth("driver"), (req, res) => {
+    const mine = (ensure().paymentIssues || []).filter((item) => item.driverId === req.driver.id).slice(-8).reverse();
+    res.json({ reports: mine.map((item) => ({ id: item.id, note: item.note, amount: item.amount, at: item.at })) });
+  });
+
+  app.post("/driver/support/payment", auth("driver"), (req, res) => {
+    const note = String(req.body.note || "").trim();
+    if (note.length < 3) return res.status(400).json({ error: "Describe the payment problem." });
+    if (hasAccountNumber(note)) {
+      return res.status(400).json({ error: "Leave out card and bank numbers. Dispatch already has your account." });
+    }
+    let amount = null;
+    if (req.body.amount !== undefined && req.body.amount !== null && req.body.amount !== "") {
+      amount = Number(req.body.amount);
+      if (!Number.isFinite(amount) || amount < 0 || amount > 10000) {
+        return res.status(400).json({ error: "Enter the amount as a number." });
+      }
+      amount = rules.round(amount);
+    }
+    const db = ensure();
+    let orderId = null;
+    if (req.body.orderId) {
+      const order = (db.orders || []).find((item) => item.id === req.body.orderId && item.driverId === req.driver.id);
+      if (!order) return res.status(404).json({ error: "That delivery was not found." });
+      orderId = order.id;
+    }
+    const report = {
+      id: crypto.randomUUID(),
+      driverId: req.driver.id,
+      note: note.slice(0, 240),
+      amount,
+      orderId,
+      at: new Date().toISOString(),
+    };
+    update((current) => {
+      current.paymentIssues = current.paymentIssues || [];
+      current.paymentIssues.push(report);
+      audit(current, { actorId: req.driver.id, action: "payment_issue", note: report.note, orderId: orderId || undefined });
+    });
+    res.json({
+      ok: true,
+      message: "Dispatch has this payment report.",
+      report: { id: report.id, note: report.note, amount: report.amount, at: report.at },
+    });
   });
 
   app.post("/driver/delivery/text", auth("driver"), (req, res) => {
@@ -1216,6 +1270,22 @@ function createApp() {
     res.json(result);
   });
 
+  app.get("/admin/payment-issues", auth("admin"), (_req, res) => {
+    const db = ensure();
+    const issues = (db.paymentIssues || []).slice(-30).reverse().map((item) => {
+      const driver = db.drivers.find((row) => row.id === item.driverId);
+      return {
+        id: item.id,
+        driverName: driver ? driver.name : "Driver",
+        level: driver ? driver.level : "",
+        note: item.note,
+        amount: item.amount,
+        at: item.at,
+      };
+    });
+    res.json({ issues });
+  });
+
   app.get("/admin/audit", auth("admin"), (_req, res) => {
     const db = ensure();
     res.json({ audit: db.audit.slice(-50).reverse() });
@@ -1406,12 +1476,22 @@ function publicLevel(driver, db, rolling) {
   };
 }
 
+function supportLine(driver) {
+  const priority = rules.LEVEL_RANK[driver.level] >= rules.LEVEL_RANK.gold;
+  if (priority) return { display: "(415) 555-0188", dial: `tel:${PRIORITY_DIAL}`, priority: true };
+  return { display: "(415) 555-0199", dial: `tel:${SUPPORT_DIAL}`, priority: false };
+}
+
+function hasAccountNumber(text) {
+  return String(text).replace(/[^\d]/g, "").length >= 13;
+}
+
 function rewardsFor(level) {
   const all = [
     ["starter", "Full pay, 100% of tips, Thursday payout"],
     ["bronze", "Badge, cap and bag, cheaper instant cash-out"],
     ["silver", "Book shifts 24 hours early, 2 free instant cash-outs a week"],
-    ["gold", "Book shifts 48 hours early, first look at open requests, free instant cash-out"],
+    ["gold", "Book shifts 48 hours early, first look at open requests, free instant cash-out, priority support line"],
     ["platinum", "Extra $0.25 per delivery and up to 3 favorite restaurants"],
     ["diamond", "Extra $0.50 per delivery, a $2 mentoring bonus, and a driver advisory seat"],
   ];
@@ -1737,11 +1817,11 @@ function adminPage() {
 <style>body{font-family:Georgia,serif;background:#f3f0e8;color:#1c2b24;margin:0;padding:32px}button,input{font:inherit;padding:8px 12px;margin:4px 0}table{border-collapse:collapse;width:100%;background:#fffdf8}td,th{border-bottom:1px solid #e4ddd0;text-align:left;padding:8px}</style></head>
 <body><h1>Dispatch</h1><p>Approve drivers and record a reason for any level change.</p>
 <div id="login"><input id="email" value="admin@popdrivers.example"><br><input id="password" type="password" value="PopDrivers123!"><br><button id="go">Sign in</button></div>
-<div id="app" hidden><button id="out">Sign out</button><h2>Drivers</h2><table id="rows"></table><h2>Recent activity</h2><pre id="log"></pre></div>
+<div id="app" hidden><button id="out">Sign out</button><h2>Drivers</h2><table id="rows"></table><h2>Payment issues</h2><pre id="pay"></pre><h2>Recent activity</h2><pre id="log"></pre></div>
 <script>
 let token = sessionStorage.getItem('pop_admin') || '';
 const api = (path, opts={}) => fetch(path, { ...opts, headers: { 'Content-Type':'application/json', ...(token?{Authorization:'Bearer '+token}:{}) , ...(opts.headers||{}) }, body: opts.body ? JSON.stringify(opts.body) : undefined }).then(async r => { const d = await r.json(); if(!r.ok) throw new Error(d.error||'Error'); return d; });
-async function show(){ if(!token) return; document.getElementById('login').hidden = true; document.getElementById('app').hidden = false; const data = await api('/admin/drivers'); const audit = await api('/admin/audit'); document.getElementById('rows').innerHTML = '<tr><th>Name</th><th>Status</th><th>Level</th><th></th></tr>' + data.drivers.map(d => '<tr><td>'+d.name+'</td><td>'+d.status+'</td><td>'+d.level+' · '+d.lifetimeCompleted+'</td><td><button data-reply="'+d.id+'">Reply</button>'+(d.status!=='approved'?' <button data-id="'+d.id+'">Approve</button>':'')+'</td></tr>').join(''); document.getElementById('log').textContent = audit.audit.map(a => a.at+' '+a.action).join('\\n'); document.querySelectorAll('button[data-id]').forEach(btn => btn.onclick = async () => { await api('/admin/drivers/'+btn.dataset.id+'/approve', { method:'POST', body:{} }); show(); }); document.querySelectorAll('button[data-reply]').forEach(btn => btn.onclick = async () => { const text = prompt('Message to this driver'); if (!text) return; await api('/admin/drivers/'+btn.dataset.reply+'/dispatch', { method:'POST', body:{ text } }); }); }
+async function show(){ if(!token) return; document.getElementById('login').hidden = true; document.getElementById('app').hidden = false; const data = await api('/admin/drivers'); const audit = await api('/admin/audit'); const pays = await api('/admin/payment-issues'); document.getElementById('pay').textContent = pays.issues.map(i => i.at+' '+i.driverName+' '+(i.amount==null?'':'$'+i.amount+' ')+i.note).join('\\n'); document.getElementById('rows').innerHTML = '<tr><th>Name</th><th>Status</th><th>Level</th><th></th></tr>' + data.drivers.map(d => '<tr><td>'+d.name+'</td><td>'+d.status+'</td><td>'+d.level+' · '+d.lifetimeCompleted+'</td><td><button data-reply="'+d.id+'">Reply</button>'+(d.status!=='approved'?' <button data-id="'+d.id+'">Approve</button>':'')+'</td></tr>').join(''); document.getElementById('log').textContent = audit.audit.map(a => a.at+' '+a.action).join('\\n'); document.querySelectorAll('button[data-id]').forEach(btn => btn.onclick = async () => { await api('/admin/drivers/'+btn.dataset.id+'/approve', { method:'POST', body:{} }); show(); }); document.querySelectorAll('button[data-reply]').forEach(btn => btn.onclick = async () => { const text = prompt('Message to this driver'); if (!text) return; await api('/admin/drivers/'+btn.dataset.reply+'/dispatch', { method:'POST', body:{ text } }); }); }
 document.getElementById('go').onclick = async () => { const data = await api('/auth/admin/login', { method:'POST', body:{ email: email.value, password: password.value } }); token = data.token; sessionStorage.setItem('pop_admin', token); show(); };
 document.getElementById('out').onclick = () => { token=''; sessionStorage.removeItem('pop_admin'); location.reload(); };
 if (token) show();
