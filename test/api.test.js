@@ -206,16 +206,16 @@ async function main() {
 
   const badPassword = await call("/auth/driver/login", {
     method: "POST",
-    body: { email: "raj@example.com", password: "wrong-password" },
+    body: { email: "neerajmshr98@gmail.com", password: "wrong-password" },
   });
   assert.strictEqual(badPassword.status, 401);
 
   const emailLogin = await call("/auth/driver/login", {
     method: "POST",
-    body: { email: "raj@example.com", password: "PopDrivers123!", deviceId: "phone-email" },
+    body: { email: "neerajmshr98@gmail.com", password: "PopDrivers123!", deviceId: "phone-email" },
   });
   assert.strictEqual(emailLogin.status, 200);
-  assert.strictEqual(emailLogin.data.driver.email, "raj@example.com");
+  assert.strictEqual(emailLogin.data.driver.email, "neerajmshr98@gmail.com");
   assert.strictEqual(emailLogin.data.driver.level, "silver");
 
   const shortPassword = await call("/auth/driver/signup", {

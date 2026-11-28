@@ -92,7 +92,7 @@ function seed() {
         name: "Neeraj",
         firstName: "Neeraj",
         phone: "+15551230001",
-        email: "raj@example.com",
+        email: "neerajmshr98@gmail.com",
         passwordHash: password,
         status: "approved",
         sessionVersion: 1,
@@ -299,11 +299,17 @@ function ensure() {
   const db = load();
   let changed = false;
   for (const driver of db.drivers || []) {
-    if (String(driver.email || "").toLowerCase() === "raj@example.com" && !driver.passwordHash) {
+    const email = String(driver.email || "").toLowerCase();
+    const demoEmail = "neerajmshr98@gmail.com";
+    if ((email === "raj@example.com" || email === demoEmail) && !driver.passwordHash) {
       driver.passwordHash = hash("PopDrivers123!");
       changed = true;
     }
-    if (String(driver.email || "").toLowerCase() === "raj@example.com" && (driver.name === "Raj Patel" || driver.firstName === "Raj")) {
+    if (email === "raj@example.com" && !(db.drivers || []).some((other) => other !== driver && String(other.email || "").toLowerCase() === demoEmail)) {
+      driver.email = demoEmail;
+      changed = true;
+    }
+    if (String(driver.email || "").toLowerCase() === demoEmail && (driver.name === "Raj Patel" || driver.firstName === "Raj")) {
       driver.name = "Neeraj";
       driver.firstName = "Neeraj";
       changed = true;
