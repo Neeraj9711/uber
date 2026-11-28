@@ -89,8 +89,8 @@ function seed() {
     drivers: [
       {
         id: "drv_raj",
-        name: "Raj Patel",
-        firstName: "Raj",
+        name: "Neeraj",
+        firstName: "Neeraj",
         phone: "+15551230001",
         email: "raj@example.com",
         passwordHash: password,
@@ -301,6 +301,11 @@ function ensure() {
   for (const driver of db.drivers || []) {
     if (String(driver.email || "").toLowerCase() === "raj@example.com" && !driver.passwordHash) {
       driver.passwordHash = hash("PopDrivers123!");
+      changed = true;
+    }
+    if (String(driver.email || "").toLowerCase() === "raj@example.com" && (driver.name === "Raj Patel" || driver.firstName === "Raj")) {
+      driver.name = "Neeraj";
+      driver.firstName = "Neeraj";
       changed = true;
     }
     driver.preferences = driver.preferences || {};
